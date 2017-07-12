@@ -17,9 +17,12 @@ import com.github.neuralnetworks.tensor.Matrix;
 import com.github.neuralnetworks.tensor.Tensor;
 import com.github.neuralnetworks.tensor.TensorFactory;
 import com.github.neuralnetworks.util.Environment;
+import org.jfree.base.log.DefaultLog;
+import org.jfree.base.log.LogConfiguration;
+import org.jfree.util.Log;
+import org.jfree.util.PrintStreamLogTarget;
 import org.junit.Test;
 
-import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LongSummaryStatistics;
@@ -40,14 +43,25 @@ import static org.junit.Assert.assertEquals;
 
 public class GPULoadTest {
 
-    private static final PrintStream out = System.out;
+    private static final int COOLDOWN_MILLIS = 500;
 
-    private static final int COOLDOWN_MILLIS = 2000;
+
     private static final int WARMUP_ITERATIONS = 5;
     private static final int MEASUREMENT_ITERATIONS = 10;
 
     private static final Environment ENV = Environment.getInstance();
     private static final KernelManager KM = KernelManager.instance();
+
+    static {
+        final String logLevel = "Info"; // LogTarget.INFO
+        LogConfiguration.setLogLevel(logLevel);
+
+        final DefaultLog log = DefaultLog.getDefaultLog();
+        log.init();
+        log.addTarget(new PrintStreamLogTarget());
+
+        DefaultLog.installDefaultLog();
+    }
 
     /* JMH annotations:
         @Benchmark()
@@ -63,11 +77,10 @@ public class GPULoadTest {
         stream(EXECUTION_MODE.values()).forEach(executionMode -> {
                     try {
                         sleep(COOLDOWN_MILLIS);
-                        out.print("\n" + executionMode + ": ");
+                        Log.info("\n" + executionMode + ": ");
                         range(0, WARMUP_ITERATIONS).forEach(x -> testWeightedSumBP(executionMode));
                         LongSummaryStatistics stats = range(0, MEASUREMENT_ITERATIONS).mapToLong(x -> timeit(executionMode, timeSupplier)).summaryStatistics();
-                        out.println(stats.toString());
-                        out.flush();
+                        Log.info(stats.toString());
                     } catch (InterruptedException ie) {
                         ie.printStackTrace();
                     }
@@ -95,6 +108,11 @@ public class GPULoadTest {
     private void testWeightedSumBP(EXECUTION_MODE executionMode) {
         ENV.setExecutionMode(executionMode);
         interrogateExecutionStrategy();
+
+        StringBuilder deviceUsageBuilder = new StringBuilder();
+        interrogateKernelManager(deviceUsageBuilder);
+
+        StringBuilder profileSummaryBuilder = new StringBuilder();
 
         Layer il1 = new Layer();
         Layer ol = new Layer();
@@ -141,7 +159,7 @@ public class GPULoadTest {
         i1.set(5, 1, 1);
         i1.set(6, 2, 1);
 
-        interrogateKernel(connections, vp, ol);
+        interrogateKernelForNN(connections, vp, ol, profileSummaryBuilder);
 
         aws.calculate(connections, vp, ol);
 
@@ -209,34 +227,51 @@ public class GPULoadTest {
         assertEquals(64.1, o.get(0, 1), 0.01);
         assertEquals(64.2, o.get(1, 0), 0.01);
         assertEquals(154.2, o.get(1, 1), 0.01);
+
+        outputSummaryBuilders(deviceUsageBuilder, profileSummaryBuilder);
+    }
+
+    private void outputSummaryBuilders(StringBuilder deviceUsageBuilder, StringBuilder profileSummaryBuilder) {
+        Log.info(deviceUsageBuilder);
+        Log.info(profileSummaryBuilder);
     }
 
     private void interrogateExecutionStrategy() {
         String executionStrategyName = ENV.getExecutionStrategy().getClass().getSimpleName();
-        out.println("ExecutionStrategy: " + executionStrategyName);
+        Log.debug("ExecutionStrategy: " + executionStrategyName);
     }
 
-    private void interrogateKernel(List<Connections> connections, ValuesProvider vp, Layer ol) {
+    private void interrogateKernelManager(StringBuilder deviceUsageBuilder) {
+        interrogateDevice(KM.bestDevice());
+        KM.reportDeviceUsage(deviceUsageBuilder, true);
+    }
+
+    private void interrogateKernelForNN(List<Connections> connections, ValuesProvider vp, Layer ol, StringBuilder profileSummaryBuilder) {
         AparapiWeightedSum kernel = new AparapiWeightedSum(connections, vp, ol);
 
-        KernelProfile profile = KM.getProfile(kernel.getClass());
-        out.println("devices:");
-        profile.getDevices().forEach(this::interrogateDevice);
-        out.println("device profiles:");
-        profile.getDeviceProfiles().forEach(deviceProfile -> out.println(deviceProfile.toString()));
+        interrogateKernelProfile(kernel, profileSummaryBuilder);
 
         KernelPreferences preferences = KM.getPreferences(kernel);
-        out.println("preferred devices:");
+        Log.debug("preferred devices:");
         preferences.getPreferredDevices(kernel).forEach(this::interrogateDevice);
-        out.println("failed devices:");
+        // interrogateDevice(preferences.getPreferredDevice(kernel));
+        Log.debug("failed devices:");
         preferences.getFailedDevices().forEach(this::interrogateDevice);
+    }
+
+    private void interrogateKernelProfile(AparapiWeightedSum kernel, StringBuilder profileSummaryBuilder) {
+        KernelProfile profile = KM.getProfile(kernel.getClass());
+        Log.debug("devices:");
+        profile.getDevices().forEach(this::interrogateDevice);
+        Log.debug("device profiles:");
+        profile.getDeviceProfiles().forEach(deviceProfile -> Log.debug(deviceProfile.toString()));
+        KM.reportProfilingSummary(profileSummaryBuilder);
     }
 
     private void interrogateDevice(Device device) {
         long id = device.getDeviceId();
         Device.TYPE type = device.getType();
         String shortDescription = device.getShortDescription();
-        out.println(new StringJoiner(",").add(String.valueOf(id)).add(type.name()).add(shortDescription).toString());
-
+        Log.info(new StringJoiner(",").add(String.valueOf(id)).add(type.name()).add(shortDescription).toString());
     }
 }
